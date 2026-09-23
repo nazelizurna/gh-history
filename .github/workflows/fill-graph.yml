@@ -1,0 +1,75 @@
+name: Fill graph
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: "Verified email on your GitHub account (or ID+username@users.noreply.github.com)"
+        required: true
+      start:
+        description: "Start date"
+        default: "2026-01-01"
+      end:
+        description: "End date"
+        default: "2026-08-30"
+      total:
+        description: "Approx. total commits"
+        default: "3153"
+
+permissions:
+  contents: write
+
+jobs:
+  fill:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate backdated commits
+        env:
+          EMAIL: ${{ inputs.email }}
+          START: ${{ inputs.start }}
+          END: ${{ inputs.end }}
+          TOTAL: ${{ inputs.total }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          git config user.email "$EMAIL"
+          git config user.name "$OWNER"
+          cat > /tmp/fill.py << 'PY'
+          import datetime as dt, os, random, subprocess
+
+          start = dt.date.fromisoformat(os.environ["START"])
+          end = dt.date.fromisoformat(os.environ["END"])
+          total_target = int(os.environ["TOTAL"])
+          n_days = (end - start).days + 1
+
+          weights = []
+          for i in range(n_days):
+              day = start + dt.timedelta(days=i)
+              ramp = 0.5 + 1.5 * (i / max(n_days - 1, 1))      # busier later in the year
+              weekend = 0.35 if day.weekday() >= 5 else 1.0     # quieter weekends
+              if random.random() < 0.12:                        # random empty days
+                  weights.append(0.0)
+                  continue
+              burst = 3.0 if random.random() < 0.05 else 1.0    # occasional bright squares
+              weights.append(random.random() * ramp * weekend * burst)
+
+          scale = total_target / sum(weights)
+          made = 0
+          for i, w in enumerate(weights):
+              count = round(w * scale)
+              day = start + dt.timedelta(days=i)
+              minutes = sorted(random.sample(range(9 * 60, 22 * 60), min(count, 780)))
+              for m in minutes:
+                  ts = dt.datetime.combine(day, dt.time(m // 60, m % 60, random.randint(0, 59)))
+                  iso = ts.isoformat()
+                  env = {**os.environ, "GIT_AUTHOR_DATE": iso, "GIT_COMMITTER_DATE": iso}
+                  subprocess.run(["git", "commit", "--allow-empty", "--quiet", "-m", f"update {iso}"],
+                                 env=env, check=True)
+                  made += 1
+          print("commits created:", made)
+          PY
+          python3 /tmp/fill.py
+
+      - name: Push
+        run: git push
